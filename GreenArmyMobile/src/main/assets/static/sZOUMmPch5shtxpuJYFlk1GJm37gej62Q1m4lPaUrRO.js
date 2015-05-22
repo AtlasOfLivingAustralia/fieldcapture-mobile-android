@@ -412,9 +412,19 @@ function orEmptyArray(v) {
     return v === undefined ? [] : v;
 }
 
-// returns blank string if the object or the specified property is undefined, else the value
 function exists(parent, prop) {
-    return parent === undefined ? '' : (parent[prop] === undefined ? '' : parent[prop]);
+    if(parent === undefined)
+        return '';
+    if(parent == null)
+        return '';
+    if(parent[prop] === undefined)
+        return '';
+    if(parent[prop] == null)
+        return '';
+    if(ko.isObservable(parent[prop])){
+        return parent[prop]();
+    }
+    return parent[prop];
 }
 
 function neat_number (number, decimals) {
@@ -545,7 +555,7 @@ function showAlert(message, alerttype, target) {
 }
 
 function blockUIWithMessage(message) {
-    $.blockUI({ message: message,
+    $.blockUI({ message: message, fadeIn:0,
         css: {
             border: 'none',
             padding: '15px',
@@ -556,6 +566,230 @@ function blockUIWithMessage(message) {
             color: '#fff'
         } });
 }
+
+function confirmOnPageExit(e) {
+    // If we haven't been passed the event get the window.event
+    e = e || window.event;
+
+    var message = 'You have unsaved changes.';
+
+    // For IE6-8 and Firefox prior to version 4
+    if (e)
+    {
+        e.returnValue = message;
+    }
+
+    // For Chrome, Safari, IE8+ and Opera 12+
+    return message;
+};
+
+/**
+ * Attaches a simple dirty flag (one shot change detection) to the supplied model, then once the model changes,
+ * auto-saves the model using the supplied key every autoSaveIntervalInSeconds seconds.
+ * @param viewModel the model to autosave.
+ * @param key the (localStorage) key to use when saving the model.
+ * @param autoSaveIntervalInSeconds [optional, default=60] how often to autosave the edited model.
+ */
+function autoSaveModel(viewModel, saveUrl, options) {
+
+    var defaults = {
+        storageKey:window.location.href+'.autosaveData',
+        autoSaveIntervalInSeconds:60,
+        restoredDataWarningSelector:"#restoredData",
+        resultsMessageId:"save-result-placeholder",
+        timeoutMessageSelector:"#timeoutMessage",
+        errorMessage:"Failed to save your data: ",
+        successMessage:"Save successful!",
+        errorCallback:undefined,
+        successCallback:undefined
+    };
+
+    var config = $.extend(defaults, options);
+
+    var serializeModel = function() {
+        return (typeof viewModel.modelAsJSON === 'function') ? viewModel.modelAsJSON() : ko.toJSON(viewModel);
+    };
+    var autoSaveModel = function() {
+        amplify.store(config.storageKey, serializeModel());
+        if (viewModel.dirtyFlag.isDirty()) {
+            window.setTimeout(autoSaveModel, config.autoSaveIntervalInSeconds*1000);
+        }
+    }
+
+    if (typeof viewModel.dirtyFlag === 'undefined') {
+        viewModel.dirtyFlag = ko.simpleDirtyFlag(viewModel);
+    }
+    viewModel.dirtyFlag.isDirty.subscribe(
+        function() {
+            if (viewModel.dirtyFlag.isDirty()) {
+                autoSaveModel();
+            }
+        }
+    );
+
+    viewModel.saveWithErrorDetection = function(successCallback, errorCallback) {
+        $(config.restoredDataWarningSelector).hide();
+        var json = serializeModel();
+        // Store data locally in case the save fails.plan
+        amplify.store(config.storageKey, json);
+
+        return $.ajax({
+            url: saveUrl,
+            type: 'POST',
+            data: json,
+            contentType: 'application/json',
+            success: function (data) {
+                if (data.error) {
+                    showAlert(config.errorMessage + data.detail + ' \n' + data.error,
+                        "alert-error",config.resultsMessageId);
+                    if (typeof errorCallback === 'function') {
+                        errorCallback(data);
+                    }
+                    if (typeof config.errorCallback === 'function') {
+                        config.errorCallback(data);
+                    }
+
+                } else {
+                    showAlert(config.successMessage,"alert-success",config.resultsMessageId);
+                    amplify.store(config.storageKey, null);
+                    viewModel.dirtyFlag.reset();
+                    if (typeof successCallback === 'function') {
+                        successCallback(data);
+                    }
+                    if (typeof config.successCallback === 'function') {
+                        config.successCallback(data);
+                    }
+                }
+            },
+            error: function (data) {
+                bootbox.alert($(config.timeoutMessageSelector).html());
+                if (typeof errorCallback === 'function') {
+                    errorCallback(data);
+                }
+                if (typeof config.errorCallback === 'function') {
+                    config.errorCallback(data);
+                }
+            }
+        });
+    }
+
+}
+
+/**
+ * Roles have camelCase names and this is a work-around for printing them from AJAX
+ * responses.
+ * TODO implement i18n encoding with JS
+ *
+ * @param text
+ * @returns {string}
+ */
+function decodeCamelCase(text) {
+    var result = text.replace( /([A-Z])/g, " $1" );
+    return result.charAt(0).toUpperCase() + result.slice(1); // capitalize the first letter - as an example.
+}
+
+//
+if (typeof Object.create !== 'function') {
+    Object.create = function (o) {
+        function F() {}
+        F.prototype = o;
+        return new F();
+    };
+}
+
+/** A function that works with documents.  Intended for inheritance by ViewModels */
+function Documents() {
+    var self = this;
+    self.documents = ko.observableArray();
+    self.findDocumentByRole = function(documents, roleToFind) {
+        for (var i=0; i<documents.length; i++) {
+            var role = ko.utils.unwrapObservable(documents[i].role);
+            var status = ko.utils.unwrapObservable(documents[i].status);
+            if (role === roleToFind && status !== 'deleted') {
+                return documents[i];
+            }
+        }
+        return null;
+    };
+    self.logoUrl = ko.pureComputed(function() {
+        var logoDocument = self.findDocumentByRole(self.documents(), 'logo');
+        return logoDocument ? logoDocument.url : null;
+    });
+    self.bannerUrl = ko.pureComputed(function() {
+        var bannerDocument = self.findDocumentByRole(self.documents(), 'banner');
+        return bannerDocument ? bannerDocument.url : null;
+    });
+
+    self.asBackgroundImage = function(url) {
+        return url ? 'url('+url+')' : null;
+    };
+
+    self.mainImageUrl = ko.pureComputed(function() {
+        var mainImageDocument = self.findDocumentByRole(self.documents(), 'mainImage');
+        return mainImageDocument ? mainImageDocument.url : null;
+    });
+
+    self.removeBannerImage = function() {
+        self.deleteDocumentByRole('banner');
+    };
+
+    self.removeLogoImage = function() {
+        self.deleteDocumentByRole('logo');
+    };
+
+    self.removeMainImage = function() {
+        self.deleteDocumentByRole('mainImage');
+    };
+
+    // this supports display of the project's primary images
+    this.primaryImages = ko.computed(function () {
+        var pi = $.grep(self.documents(), function (doc) {
+            return ko.utils.unwrapObservable(doc.isPrimaryProjectImage);
+        });
+        return pi.length > 0 ? pi : null;
+    });
+
+    var allowedHost = ['fast.wistia.com','embed-ssl.ted.com', 'www.youtube.com', 'player.vimeo.com'];
+    this.embeddedVideos = ko.computed(function () {
+        var ev = $.grep(self.documents(), function (doc) {
+            var isPublic = ko.utils.unwrapObservable(doc.public);
+            var embeddedVideo = ko.utils.unwrapObservable(doc.embeddedVideo);
+            if(isPublic && embeddedVideo) {
+                var html = $.parseHTML(embeddedVideo);
+                for(var i = 0; i < html.length; i++){
+                    var element = html[i];
+                    var src = element.getAttribute('src');
+                    if(src && $.inArray(getHostName(src), allowedHost) > -1){
+                        doc.iframe = '<iframe width="100%" src ="' + src + '" height = "' + element.getAttribute("height") + '"/></iframe>';
+                        return doc;
+                    }
+                    break;
+                }
+            }
+        });
+        return ev.length > 0 ? ev : null;
+    });
+
+    self.deleteDocumentByRole = function(role) {
+        var doc = self.findDocumentByRole(self.documents(), role);
+        if (doc) {
+            if (doc.documentId) {
+                doc.status = 'deleted';
+                self.documents.valueHasMutated(); // observableArrays don't fire events when contained objects are mutated.
+            }
+            else {
+                self.documents.remove(doc);
+            }
+        }
+    };
+
+    self.ignore = ['documents', 'logoUrl', 'bannerUrl', 'mainImageUrl', 'primaryImages', 'embeddedVideos'];
+
+};
+
+
+
+
 /*
  * Copyright (c) 2013 Viral Patel
  * http://viralpatel.net

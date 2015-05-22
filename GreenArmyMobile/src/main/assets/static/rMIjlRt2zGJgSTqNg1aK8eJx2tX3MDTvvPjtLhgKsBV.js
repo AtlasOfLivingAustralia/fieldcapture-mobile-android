@@ -1,4 +1,4 @@
-var imageLocation = "${imageUrl}";
+
 /**
  * A view model to capture metadata about a document and manage progress / feedback as a file is uploaded.
  *
@@ -10,8 +10,27 @@ var imageLocation = "${imageUrl}";
  * @param owner an object containing key and value properties identifying the owning entity for the document. eg. {key:'projectId', value:'the_id_of_the_owning_project'}
  * @constructor
  */
-function DocumentViewModel (doc, owner) {
+function DocumentViewModel (doc, owner, settings) {
     var self = this;
+
+    var defaults = {
+        //Information is the default option.
+        roles:  [{id: 'information', name: 'Information'}, {id:'embeddedVideo', name:'Embedded Video'}, {id: 'programmeLogic', name: 'Programme Logic'}],
+        stages:[],
+        showSettings: true,
+        thirdPartyDeclarationTextSelector:'#thirdPartyDeclarationText',
+        imageLocation: fcConfig.imageLocation
+    };
+    this.settings = $.extend({}, defaults, settings);
+
+    //Associate project document to stages.
+    this.maxStages = doc.maxStages;
+    for(i = 0; i < this.maxStages; i++){
+    	this.settings.stages.push((i+1))
+    }
+    this.stage = ko.observable(doc ? doc.stage : 0);
+    this.stages = this.settings.stages;
+    
     // NOTE that attaching a file is optional, ie you can have a document record without a physical file
     this.filename = ko.observable(doc ? doc.filename : '');
     this.filesize = ko.observable(doc ? doc.filesize : '');
@@ -19,14 +38,17 @@ function DocumentViewModel (doc, owner) {
     // the notes field can be used as a pseudo-document (eg a deferral reason) or just for additional metadata
     this.notes = ko.observable(doc.notes);
     this.filetypeImg = function () {
-        return imageLocation + "/" + iconnameFromFilename(self.filename());
+        return self.settings.imageLocation + "/" + iconnameFromFilename(self.filename());
     };
+    this.status = ko.observable(doc.status || 'active');
     this.attribution = ko.observable(doc ? doc.attribution : '');
     this.license = ko.observable(doc ? doc.license : '');
     this.type = ko.observable(doc.type);
     this.role = ko.observable(doc.role);
+    this.roles = this.settings.roles;
     this.public = ko.observable(doc.public);
     this.url = doc.url;
+    this.thumbnailUrl = doc.thumbnailUrl ? doc.thumbnailUrl : doc.url;
     this.documentId = doc.documentId;
     this.hasPreview = ko.observable(false);
     this.error = ko.observable();
@@ -36,21 +58,61 @@ function DocumentViewModel (doc, owner) {
     this.fileButtonText = ko.computed(function() {
         return (self.filename() ? "Change file" : "Attach file");
     });
-    // this supports a checkbox that allows the user to assert that this image is to be used
-    // as the primary project image - implemented as a writeable computed
-    this.isPrimaryProjectImage = ko.computed({
-        read: function () {
-            return self.role() === 'primary' && self.type() === 'image';
-        },
-        write: function (value) {
-            if (value) {
-                self.role('primary');
-            } else {
-                self.role('information');
-            }
+    this.onRoleChange = function(val) {
+        if(this.role() == 'programmeLogic'){
+            this.public(false);
+            this.isPrimaryProjectImage(false);
         }
+    };
+
+    this.isPrimaryProjectImage = ko.observable(doc.isPrimaryProjectImage);
+    this.thirdPartyConsentDeclarationMade = ko.observable(doc.thirdPartyConsentDeclarationMade);
+    this.thirdPartyConsentDeclarationText = null;
+    this.embeddedVideo = ko.observable(doc.embeddedVideo);
+    this.embeddedVideoVisible = ko.computed(function() {
+        return (self.role() == 'embeddedVideo');
     });
 
+    this.thirdPartyConsentDeclarationMade.subscribe(function(declarationMade) {
+        // Record the text that the user agreed to (as it is an editable setting).
+        if (declarationMade) {
+            self.thirdPartyConsentDeclarationText = $(self.settings.thirdPartyDeclarationTextSelector).text();
+        }
+        else {
+            self.thirdPartyConsentDeclarationText = null;
+        }
+        $("#thirdPartyConsentCheckbox").closest('form').validationEngine("updatePromptsPosition")
+    });
+    this.thirdPartyConsentDeclarationRequired = ko.computed(function() {
+        return self.type() == 'image' && self.public();
+    });
+    this.thirdPartyConsentDeclarationRequired.subscribe(function(newValue) {
+        if (newValue) {
+            setTimeout(function() {$("#thirdPartyConsentCheckbox").validationEngine('validate');}, 100);
+        }
+    });
+    this.fileReady = ko.computed(function() {
+        return self.filename() && self.progress() === 0 && !self.error();
+    });
+    this.saveEnabled = ko.computed(function() {
+
+        if (self.thirdPartyConsentDeclarationRequired() && !self.thirdPartyConsentDeclarationMade()) {
+            return false;
+        }
+        if(self.role() == 'embeddedVideo'){
+            return true;
+        }
+        return self.fileReady();
+    });
+    this.saveHelp = ko.computed(function() {
+        if (!self.fileReady()) {
+            return 'Attach a file using the "+ Attach file" button';
+        }
+        else if (!self.saveEnabled()) {
+            return 'You must accept the Privacy Declaration before an image can be made viewable by everyone';
+        }
+        return '';
+    });
     // make this support both the old key/value syntax and any set of props so we can define more than
     // one owner attribute
     if (owner !== undefined) {
@@ -144,7 +206,11 @@ function DocumentViewModel (doc, owner) {
 
     this.toJSONString = function() {
         // These are not properties of the document object, just used by the view model.
-        return JSON.stringify(ko.mapping.toJS(self, {'ignore':['helper', 'progress', 'hasPreview', 'error', 'filesize', 'fileLabel', 'file', 'complete']}));
+        return JSON.stringify(self.modelForSaving());
+    }
+
+    this.modelForSaving = function() {
+        return ko.mapping.toJS(self, {'ignore':['embeddedVideoVisible','iframe','helper', 'progress', 'hasPreview', 'error', 'fileLabel', 'file', 'complete', 'fileButtonText', 'roles', 'stages','maxStages', 'settings', 'thirdPartyConsentDeclarationRequired', 'saveEnabled', 'saveHelp', 'fileReady']});
     }
 }
 
@@ -164,7 +230,10 @@ function attachViewModelToFileUpload(uploadUrl, documentViewModel, uiSelector, p
         url:uploadUrl,
         formData:function(form) {return [{name:'document', value:documentViewModel.toJSONString()}]},
         autoUpload:false,
-        forceIframeTransport: true
+        forceIframeTransport: true,
+        getFilesFromResponse: function(data) { // This is to support file upload on pages that include the fileupload-ui which expects a return value containing an array of files.
+            return data;
+        }
     }).on('fileuploadadd', function(e, data) {
 
         fileUploadHelper = data;
@@ -181,8 +250,18 @@ function attachViewModelToFileUpload(uploadUrl, documentViewModel, uiSelector, p
         documentViewModel.uploadProgress(data.loaded, data.total);
     }).on('fileuploaddone', function(e, data) {
 
-        var resultText = $('pre', data.result).text();
-        var result = $.parseJSON(resultText);
+        var result;
+
+        // Because of the iframe upload, the result will be returned as a query object wrapping a document containing
+        // the text in a <pre></pre> block.  If the fileupload-ui script is included, the data will be extracted
+        // before this callback is invoked, thus the check.*
+        if (data.result instanceof jQuery) {
+            var resultText = $('pre', data.result).text();
+            result = JSON.parse(resultText);
+        }
+        else {
+            result = data.result;
+        }
 
         if (!result) {
             result = {};
@@ -200,6 +279,8 @@ function attachViewModelToFileUpload(uploadUrl, documentViewModel, uiSelector, p
         documentViewModel.fileUploadFailed(data.errorThrown);
     });
 
+
+
     // We are keeping the reference to the helper here rather than the view model as it doesn't serialize correctly
     // (i.e. calls to toJSON fail).
     documentViewModel.save = function() {
@@ -213,7 +294,8 @@ function attachViewModelToFileUpload(uploadUrl, documentViewModel, uiSelector, p
                 uploadUrl,
                 {document:documentViewModel.toJSONString()},
                 function(result) {
-                    documentViewModel.fileUploaded(result);
+                    var resp = JSON.parse(result).resp;
+                    documentViewModel.fileUploaded(resp);
                 })
                 .fail(function() {
                     documentViewModel.fileUploadFailed('Error uploading document');
@@ -272,6 +354,68 @@ function showDocumentAttachInModal(uploadUrl, documentViewModel, modalSelector, 
 
     // Do the binding from the model to the view?  Or assume done already?
     $modal.modal({backdrop:'static'});
+    $modal.on('shown', function() {
+        $modal.find('form').validationEngine({'custom_error_messages': {
+            'required': {'message':'The privacy declaration is required for images viewable by everyone'}
+        }, 'autoPositionUpdate':true, promptPosition:'inline'});
+    });
 
     return result;
+}
+
+function findDocumentByRole(documents, role) {
+    for (var i=0; i<documents.length; i++) {
+        var docRole = ko.utils.unwrapObservable(documents[i].role);
+        var status = ko.utils.unwrapObservable(documents[i].status);
+
+        if (docRole === role && status !== 'deleted') {
+            return documents[i];
+        }
+    }
+    return null;
+};
+
+function findDocumentById(documents, id) {
+    if (documents) {
+        for (var i=0; i<documents.length; i++) {
+            var docId = ko.utils.unwrapObservable(documents[i].documentId);
+            var status = ko.utils.unwrapObservable(documents[i].status);
+            if (docId === id && status !== 'deleted') {
+                return documents[i];
+            }
+        }
+    }
+    return null;
+}
+
+var DocModel = function (doc) {
+    var self = this;
+    this.name = doc.name;
+    this.attribution = doc.attribution;
+    this.filename = doc.filename;
+    this.type = doc.type;
+    this.url = doc.url;
+    this.thumbnailUrl = doc.thumbnailUrl ? doc.thumbnailUrl : doc.url;
+    this.filetypeImg = function () {
+        return imageLocation + "/" + iconnameFromFilename(self.filename);
+    };
+};
+function DocListViewModel(documents) {
+    var self = this;
+    this.documents = ko.observableArray($.map(documents, function(doc) { return new DocModel(doc)} ));
+}
+function iconnameFromFilename(filename) {
+    if (filename === undefined) { return "_blank.png"; }
+    var ext = filename.split('.').pop(),
+        types = ['aac','ai','aiff','avi','bmp','c','cpp','css','dat','dmg','doc','dotx','dwg','dxf',
+            'eps','exe','flv','gif','h','hpp','html','ics','iso','java','jpg','key','mid','mp3','mp4',
+            'mpg','odf','ods','odt','otp','ots','ott','pdf','php','png','ppt','psd','py','qt','rar','rb',
+            'rtf','sql','tga','tgz','tiff','tif','txt','wav','xls','xlsx'];
+    ext = ext.toLowerCase();
+    if (ext === 'docx') { ext = 'doc' }
+    if ($.inArray(ext, types) >= 0) {
+        return ext + '.png';
+    } else {
+        return "_blank.png";
+    }
 }
