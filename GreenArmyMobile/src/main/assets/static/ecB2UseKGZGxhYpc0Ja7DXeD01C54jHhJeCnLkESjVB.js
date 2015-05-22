@@ -46,6 +46,8 @@ var SpeciesViewModel = function(data, speciesLists) {
 
     self.renderItem = function(row) {
 
+        var term = self.transients.textFieldValue();
+
         var result = '';
         if (!row.listId) {
             row.listId = 'Atlas of Living Australia';
@@ -87,7 +89,7 @@ var SpeciesViewModel = function(data, speciesLists) {
 
             var profileUrl = fcConfig.bieUrl + '/species/' + self.guid();
             $.ajax({
-                url: fcConfig.speciesProfileUrl+'/' + self.guid() + '.json',
+                url: fcConfig.speciesProfileUrl+'/' + self.guid(),
                 dataType: 'json',
                 success: function (data) {
                     var profileInfo = '<a href="'+profileUrl+'" target="_blank">';
@@ -131,6 +133,9 @@ var SpeciesViewModel = function(data, speciesLists) {
         self.transients.editing(false);
         if (self.name()) {
             self.transients.textFieldValue(self.name());
+        }
+        else {
+            self.transients.textFieldValue('');
         }
     };
 
